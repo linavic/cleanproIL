@@ -8,7 +8,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 from keep_alive import keep_alive
 
 # ==========================================
-# ⚙️ הגדרות לבוט הניקיון
+# ⚙️ הגדרות לבוט הניקיון - גרסה מתוקנת Topics
 # ==========================================
 
 PROMPT_FILE_NAME = "prompt_cleaning.txt" 
@@ -23,15 +23,14 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 try:
     with open(PROMPT_FILE_NAME, 'r', encoding='utf-8') as file:
         SYSTEM_PROMPT = file.read()
-    print("✅ הפרומפט נטען.")
 except FileNotFoundError:
     SYSTEM_PROMPT = "You are a cleaning service assistant."
 
 chats_history = {}
 
 def send_to_google_direct(history_text, user_text):
-    """ שליחה לגוגל עם הדפסת שגיאות מפורטת """
-    model_name = "gemini-1.5-flash"
+    """ שליחה לגוגל - מודל יציב 1.5 """
+    model_name = "gemini-1.5-flash" # מודל מהיר ויציב
     
     headers = {'Content-Type': 'application/json'}
     payload = {
@@ -44,77 +43,61 @@ def send_to_google_direct(history_text, user_text):
     
     try:
         response = requests.post(url, json=payload, headers=headers)
-        
         if response.status_code == 200:
             return response.json()['candidates'][0]['content']['parts'][0]['text']
         else:
-            # כאן אנחנו נראה בלוגים למה גוגל כועס עלינו
-            print(f"⚠️ Google Error: {response.status_code}")
-            print(f"Details: {response.text}") 
+            print(f"⚠️ Google Error: {response.status_code} - {response.text}")
             return None
-
     except Exception as e:
         print(f"❌ Connection Error: {e}")
         return None
 
-async def check_for_lead(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ זיהוי ליד ושליחה לערוץ """
-    if not update.message or not update.message.text: return
-
-    user_text = update.message.text
-    phone_pattern = re.compile(r'\b0?5[0-9]{8}\b') 
-    clean_text = user_text.replace("-", "").replace(" ", "")
-    
-    if phone_pattern.search(clean_text):
-        print("📞 זוהה ליד!")
-        # כאן אנחנו שולחים הודעה למנהל
-        try:
-            if TARGET_CHANNEL_ID:
-                await context.bot.send_message(chat_id=TARGET_CHANNEL_ID, text=f"📞 ליד חדש:\n{user_text}\nמאת: {update.effective_user.first_name}")
-        except Exception as e:
-            print(f"Error sending lead: {e}")
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # סינון הודעות מערכת שאינן טקסט
     if not update.message or not update.message.text: return
 
     user_text = update.message.text
     user_id = update.effective_user.id
     
-    # בדיקת ליד
-    await check_for_lead(update, context)
+    # זיהוי מאיזה נושא (Topic) נשלחה ההודעה
+    # אם זה צ'אט רגיל, המשתנה יהיה None וזה בסדר
+    topic_id = update.message.message_thread_id
 
-    # היסטוריה
+    # ניהול היסטוריה
     if user_id not in chats_history: chats_history[user_id] = []
+    
     history_txt = ""
     for msg in chats_history[user_id][-6:]:
         history_txt += f"{msg['role']}: {msg['text']}\n"
 
-    # חיווי הקלדה בתוך ה-Topic הנכון
-    message_thread_id = update.message.message_thread_id
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing', message_thread_id=message_thread_id)
+    # חיווי "מקליד..." בתוך הנושא הנכון
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing', message_thread_id=topic_id)
     
     # שליחה ל-AI
     bot_answer = send_to_google_direct(history_txt, user_text)
     
     if not bot_answer:
-        bot_answer = "מצטער, יש לי בעיה בתקשורת כרגע (בדוק לוגים בשרת). נסה שוב עוד רגע."
+        bot_answer = "מצטער, אני מבריק דירה כרגע וקצת עמוס. (תקלה בחיבור לגוגל)"
 
+    # שמירה בהיסטוריה
     chats_history[user_id].append({"role": "לקוח", "text": user_text})
     chats_history[user_id].append({"role": "אני", "text": bot_answer})
     
-    # שליחת התשובה לתוך ה-Topic הנכון!
+    # === התיקון הגדול: שליחה בחזרה לאותו Topic ===
     await context.bot.send_message(
         chat_id=update.effective_chat.id, 
         text=bot_answer, 
-        message_thread_id=message_thread_id
+        message_thread_id=topic_id 
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chats_history[update.effective_user.id] = []
+    topic_id = update.message.message_thread_id # זיהוי הנושא
+    
     await context.bot.send_message(
         chat_id=update.effective_chat.id, 
         text="שלום! אני הבוט של Cleaning Pro IL 🧹. איך אפשר לעזור?",
-        message_thread_id=update.message.message_thread_id
+        message_thread_id=topic_id
     )
 
 if __name__ == '__main__':
@@ -122,5 +105,5 @@ if __name__ == '__main__':
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler('start', start))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    print("🚀 Bot is running...")
+    print("🚀 Bot started with Topic support!")
     application.run_polling()
