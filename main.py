@@ -1,109 +1,144 @@
-import os
+  import os
 import requests
-import time
 import logging
 import re
-from telegram import Update
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 from keep_alive import keep_alive
 
 # ==========================================
-# ⚙️ הגדרות לבוט הניקיון - גרסה מתוקנת Topics
+# ⚙️ הגדרות
 # ==========================================
-
-PROMPT_FILE_NAME = "prompt_cleaning.txt" 
-
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-TARGET_CHANNEL_ID = os.environ.get('TARGET_CHANNEL_ID') 
+ADMIN_ID = 1687054059  # וודא שזה ה-ID שלך לקבלת הלידים
+
+MAX_MESSAGES = 3 
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# טעינת הפרומפט
-try:
-    with open(PROMPT_FILE_NAME, 'r', encoding='utf-8') as file:
-        SYSTEM_PROMPT = file.read()
-except FileNotFoundError:
-    SYSTEM_PROMPT = "You are a cleaning service assistant."
+# ==========================================
+# 🧠 המוח (מותאם ל-Z4U CLEANING)
+# ==========================================
+SYSTEM_PROMPT = """
+You are the smart representative for 'Z4U CLEANING SERVICES'.
+Your Services: Office cleaning, Carpet cleaning, Pre-occupancy cleaning (Deep cleaning before moving in).
+Goal: Ask clarifying questions to understand the client's cleaning needs to prepare a quote.
+RULES:
+1. NEVER ask for a phone number in the first 3 turns.
+2. If the user asks for a price, explain that it depends on the size (sqm) and condition, and ask for details.
+3. Ask: "What needs cleaning? (Office/Apartment/Carpet)", "How many rooms/sqm?", "Where is the location?".
+4. Be short, professional, and Hebrew speaking.
+"""
 
 chats_history = {}
+current_model_url = ""
 
-def send_to_google_direct(history_text, user_text):
-    """ שליחה לגוגל - מודל יציב 1.5 """
-    model_name = "gemini-1.5-flash" # מודל מהיר ויציב
-    
+# ==========================================
+# 🔍 סורק מודלים
+# ==========================================
+def find_working_model():
+    global current_model_url
+    possible_urls = [
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
+        f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}",
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+    ]
+    for url in possible_urls:
+        try:
+            if requests.post(url, json={"contents": [{"parts": [{"text": "."}]}]}, timeout=5).status_code == 200:
+                current_model_url = url
+                print(f"✅ מודל: {url}")
+                return
+        except: continue
+    current_model_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+
+find_working_model()
+
+# ==========================================
+# 🧠 שליחה ל-AI
+# ==========================================
+def send_to_google(history_text, user_text):
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{
             "parts": [{"text": f"{SYSTEM_PROMPT}\n\nהיסטוריה:\n{history_text}\nלקוח: {user_text}\nאני:"}]
         }]
     }
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-    
     try:
-        response = requests.post(url, json=payload, headers=headers)
+        response = requests.post(current_model_url, json=payload, headers=headers, timeout=15)
         if response.status_code == 200:
             return response.json()['candidates'][0]['content']['parts'][0]['text']
-        else:
-            print(f"⚠️ Google Error: {response.status_code} - {response.text}")
-            return None
-    except Exception as e:
-        print(f"❌ Connection Error: {e}")
-        return None
+        
+        # fallback אם יש שגיאה בגוגל - מותאם לניקיון
+        return "רשמתי לפני. איזה סוג ניקיון אתם צריכים? (משרדים / לפני אכלוס / שטיחים)?"
+    except:
+        return "אני מקשיב. מה גודל הנכס או המשרד שצריך לנקות?"
+
+# ==========================================
+# 📩 לוגיקה
+# ==========================================
+def get_main_keyboard():
+    return ReplyKeyboardMarkup([[KeyboardButton("📞 שלח מספר להצעת מחיר", request_contact=True)]], resize_keyboard=True)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # סינון הודעות מערכת שאינן טקסט
     if not update.message or not update.message.text: return
+    if update.effective_user.id == 777000: return
 
     user_text = update.message.text
     user_id = update.effective_user.id
     
-    # זיהוי מאיזה נושא (Topic) נשלחה ההודעה
-    # אם זה צ'אט רגיל, המשתנה יהיה None וזה בסדר
-    topic_id = update.message.message_thread_id
+    # זיהוי טלפון
+    phone_pattern = re.compile(r'05\d{1}[- ]?\d{3}[- ]?\d{4}')
+    if phone_pattern.search(user_text):
+        phone = phone_pattern.search(user_text).group(0)
+        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🔔 ליד בטקסט (Z4U)!\n{phone}\n{user_text}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="תודה! הפרטים הועברו לצוות Z4U, נחזור אליך בהקדם.", reply_markup=get_main_keyboard())
+        return
 
-    # ניהול היסטוריה
+    # היסטוריה
     if user_id not in chats_history: chats_history[user_id] = []
     
-    history_txt = ""
-    for msg in chats_history[user_id][-6:]:
-        history_txt += f"{msg['role']}: {msg['text']}\n"
+    # חיתוך לשיחה אנושית
+    if len(chats_history[user_id]) >= (MAX_MESSAGES * 2):
+        cut_msg = "תודה על הפרטים! כדי שנוכל לתת הצעת מחיר מדויקת ולשריין תאריך, אנא לחץ למטה 👇"
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=cut_msg, reply_markup=get_main_keyboard())
+        return 
 
-    # חיווי "מקליד..." בתוך הנושא הנכון
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing', message_thread_id=topic_id)
-    
-    # שליחה ל-AI
-    bot_answer = send_to_google_direct(history_txt, user_text)
-    
-    if not bot_answer:
-        bot_answer = "מצטער, אני מבריק דירה כרגע וקצת עמוס. (תקלה בחיבור לגוגל)"
+    history = ""
+    for msg in chats_history[user_id][-6:]: history += f"{msg['role']}: {msg['text']}\n"
 
-    # שמירה בהיסטוריה
-    chats_history[user_id].append({"role": "לקוח", "text": user_text})
-    chats_history[user_id].append({"role": "אני", "text": bot_answer})
+    if update.effective_chat.type == 'private':
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     
-    # === התיקון הגדול: שליחה בחזרה לאותו Topic ===
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id, 
-        text=bot_answer, 
-        message_thread_id=topic_id 
-    )
+    bot_answer = send_to_google(history, user_text)
+    
+    chats_history[user_id].append({"role": "user", "text": user_text})
+    chats_history[user_id].append({"role": "model", "text": bot_answer})
+    
+    if update.effective_chat.type == 'private':
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_markup=get_main_keyboard())
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_to_message_id=update.message.message_id)
+
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    c = update.message.contact
+    await context.bot.send_message(chat_id=ADMIN_ID, text=f"🔔 ליד כפתור (Z4U)!\n{c.phone_number}")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="תודה! הועבר לטיפול צוות הניקיון.", reply_markup=get_main_keyboard())
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chats_history[update.effective_user.id] = []
-    topic_id = update.message.message_thread_id # זיהוי הנושא
-    
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id, 
-        text="שלום! אני הבוט של Cleaning Pro IL 🧹. איך אפשר לעזור?",
-        message_thread_id=topic_id
-    )
+    # הודעת פתיחה מותאמת לניקיון
+    welcome_msg = "שלום, אני הבוט של Z4U CLEANING SERVICES 🧹\nאנו מתמחים בניקיון משרדים, ניקוי שטיחים וניקיון לפני אכלוס.\nאיך אוכל לעזור לך היום?"
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_msg, reply_markup=get_main_keyboard())
 
 if __name__ == '__main__':
     keep_alive()
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    print("🚀 Bot started with Topic support!")
-    application.run_polling()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    
+    print("✅ הבוט של Z4U מוכן לעבודה...")
+    app.run_polling(drop_pending_updates=True)
+  
