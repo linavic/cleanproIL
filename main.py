@@ -1,4 +1,4 @@
-  import os
+import os
 import requests
 import logging
 import re
@@ -142,3 +142,4 @@ if __name__ == '__main__':
     print("✅ הבוט של Z4U מוכן לעבודה...")
     app.run_polling(drop_pending_updates=True)
   
+
