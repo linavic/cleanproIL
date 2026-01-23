@@ -13,99 +13,104 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 ADMIN_ID = 1687054059
 
-MAX_MESSAGES = 3 
-
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # ==========================================
-# 🧠 המוח - מכונת מכירות לניקיון
+# 🧠 מוח גיבוי (עובד גם בלי גוגל!)
 # ==========================================
-SYSTEM_PROMPT = """
-You are 'Z4U Bot', a sales assistant for a cleaning company.
-Goals:
-1. Short answers only (Hebrew).
-2. Get 3 details: Service Type (Office/Home/Renovation), City, Size (Rooms/Sqm).
-3. CRITICAL: After getting basic info, TELL THE USER: "To get an exact price quote, please click the button below 👇".
-4. Do NOT give prices yourself.
-5. If the user says "Apartment" or "Renovation", ask "How many rooms?".
-"""
-
-chats_history = {}
-
-# ==========================================
-# 🧠 שליחה ל-AI (גרסה יציבה)
-# ==========================================
-def send_to_google(history_text, user_text):
-    # שימוש במודל המהיר והיציב ביותר כרגע
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+def solve_locally(text):
+    # מזהה מילות מפתח ועונה מיד בלי לחכות לגוגל
+    t = text.replace("?", "").replace("!", "").strip()
     
+    if any(x in t for x in ["משרד", "משרדים", "עסק"]):
+        return "מעולה. באיזו עיר המשרד וכמה מטר בערך הוא?"
+    
+    if any(x in t for x in ["דירה", "בית", "פרטי", "שיפוץ", "טופס 4", "לפני אכלוס"]):
+        return "הבנתי. כמה חדרים הדירה? (3, 4, 5?)"
+        
+    if any(x in t for x in ["שטיח", "ספה", "ריפוד"]):
+        return "אנחנו מומחים בזה. תוכל לשלוח תמונה או לתאר את הגודל?"
+        
+    if any(x in t for x in ["מחיר", "כמה עולה", "עלות"]):
+        return "המחיר תלוי בגודל. כדי לתת הצעה מדויקת - לחץ על הכפתור למטה 👇"
+        
+    return None # אם לא זוהה כלום, ננסה את גוגל
+
+# ==========================================
+# 🧠 שליחה ל-AI (עם הגנה כפולה)
+# ==========================================
+SYSTEM_PROMPT = "You represent Z4U Cleaning. Short answers in Hebrew. Ask for size/location. Always end by asking to click the button for quote."
+
+def send_to_google(history_text, user_text):
+    # ניסיון 1: מוח גיבוי מקומי
+    local_answer = solve_locally(user_text)
+    if local_answer:
+        return local_answer
+
+    # ניסיון 2: שליחה לגוגל
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{
-            "parts": [{"text": f"{SYSTEM_PROMPT}\n\nChat History:\n{history_text}\nClient: {user_text}\nBot:"}]
+            "parts": [{"text": f"{SYSTEM_PROMPT}\nHistory:\n{history_text}\nUser: {user_text}\nBot:"}]
         }]
     }
     
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        
-        # בדיקה אם יש תשובה תקינה
+        response = requests.post(url, json=payload, headers=headers, timeout=5)
         if response.status_code == 200:
             return response.json()['candidates'][0]['content']['parts'][0]['text']
         else:
-            # הדפסת השגיאה ללוג כדי שנבין מה הבעיה
-            print(f"❌ Google Error: {response.status_code} - {response.text}")
-            return "כדי לתת הצעת מחיר מדויקת, אנא לחץ על הכפתור למטה 👇 ונציג יחזור אליך מיד."
+            print(f"⚠️ Google Error: {response.status_code}")
+            return "כדי לקבל הצעת מחיר מדויקת ומהירה, אנא לחץ על הכפתור למטה 👇"
             
     except Exception as e:
-        print(f"❌ Connection Error: {e}")
-        return "קיבלתי. כדי שנוכל להתקדם להצעת מחיר, אנא לחץ על הכפתור למטה 👇"
+        print(f"⚠️ Connection Error: {e}")
+        # הודעה שלא יוצרת לופ
+        return "הפרטים נקלטו. להצעת מחיר סופית לחץ על הכפתור למטה 👇"
 
 # ==========================================
-# 📩 לוגיקה וכפתורים
+# 📩 לוגיקה
 # ==========================================
 def get_main_keyboard():
-    # כפתור גדול וברור
-    return ReplyKeyboardMarkup([[KeyboardButton("📞 קבל הצעת מחיר (לחץ כאן)", request_contact=True)]], resize_keyboard=True)
+    return ReplyKeyboardMarkup([[KeyboardButton("📞 לחץ כאן להצעת מחיר", request_contact=True)]], resize_keyboard=True)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
-    
     user_text = update.message.text
-    user_id = update.effective_user.id
-    
-    # 1. זיהוי מספר טלפון בתוך הטקסט (למקרה שהלקוח מקליד ידנית)
-    phone_pattern = re.compile(r'05\d{1}[- ]?\d{3}[- ]?\d{4}')
-    if phone_pattern.search(user_text):
-        phone = phone_pattern.search(user_text).group(0)
-        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🔥 ליד חם (הקלדה)!\nשם: {update.effective_user.first_name}\nטלפון: {phone}\nהודעה: {user_text}")
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="תודה! הפרטים נקלטו, נתקשר בדקות הקרובות.", reply_markup=get_main_keyboard())
+
+    # בדיקת ליד מהיר (מספר טלפון בטקסט)
+    phone_pattern = re.compile(r'05\d{8}')
+    if phone_pattern.search(user_text.replace("-", "")):
+        phone = phone_pattern.search(user_text.replace("-", "")).group(0)
+        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🔥 ליד בהקלדה!\n{phone}\n{user_text}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="תודה! נחזור אליך מיד.", reply_markup=get_main_keyboard())
         return
-
-    # 2. ניהול היסטוריה
-    if user_id not in chats_history: chats_history[user_id] = []
-    
-    # 3. מנגנון קיצור שיחה - אחרי 4 הודעות חותך ישר לכפתור
-    if len(chats_history[user_id]) >= 4:
-        cut_msg = "יש לי מספיק פרטים. לקבלת המחיר הסופי - לחץ על הכפתור למטה 👇"
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=cut_msg, reply_markup=get_main_keyboard())
-        # איפוס שיחה כדי לא להיתקע
-        chats_history[user_id] = []
-        return 
-
-    # בניית היסטוריה לבוט
-    history = ""
-    for msg in chats_history[user_id][-4:]: history += f"{msg['role']}: {msg['text']}\n"
 
     # חיווי הקלדה
     if update.effective_chat.type == 'private':
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     
-    # שליחה לגוגל
-    bot_answer = send_to_google(history, user_text)
+    # שליחה לפונקציה החכמה
+    bot_answer = send_to_google("", user_text)
     
-    # שמירה בהיסטוריה
-    chats_history[user_id].append({"role": "user", "text": user_text})
-    chats_history[user_id].append({"role": "model", "text": bot_answer})
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_markup=get_main_keyboard())
+
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    c = update.message.contact
+    await context.bot.send_message(chat_id=ADMIN_ID, text=f"💰 ליד כפתור!\n{c.phone_number}\n{c.first_name}")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="תודה! הפנייה הועברה, נתקשר בקרוב.", reply_markup=get_main_keyboard())
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    welcome_msg = "ברוכים הבאים ל-Z4U! 🧹\nאנחנו מבצעים ניקיון משרדים, דירות לפני אכלוס ושטיחים.\n\nמה תרצו לנקות היום?"
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_msg, reply_markup=get_main_keyboard())
+
+if __name__ == '__main__':
+    keep_alive()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    # שליחת תש
+    print("✅ הבוט (גרסת גיבוי) באוויר!")
+    app.run_polling(drop_pending_updates=True)
